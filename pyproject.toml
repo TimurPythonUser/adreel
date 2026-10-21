@@ -1,0 +1,68 @@
+[project]
+name = "adreel"
+version = "0.1.0"
+description = "Telegram-бот: рекламные AI-ролики до 30 с из материалов о товаре"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.15",
+    "aiosqlite>=0.20",
+    "alembic>=1.13",
+    "anthropic>=0.60",
+    "fal-client>=0.7",
+    "httpx>=0.27",
+    "librosa>=0.10.2",
+    "lxml>=5",
+    "lxml-html-clean>=0.4",
+    "numpy>=1.26",
+    "pillow>=10.4",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pyyaml>=6.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "trafilatura>=1.12",
+    "yt-dlp>=2025.1",
+]
+
+[project.scripts]
+adreel-bot = "adreel.bot.app:run"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["adreel"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+    "RUF001", "RUF002", "RUF003",  # кириллица в строках и комментариях — норма
+    "SIM105",                      # явный try/except/pass читается проще suppress()
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "live: вызывает платные API, запускать только с RUN_LIVE_TESTS=1",
+    "ffmpeg: нужен ffmpeg в PATH",
+]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true

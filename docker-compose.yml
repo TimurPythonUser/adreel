@@ -1,0 +1,49 @@
+# Бот + локальный Telegram Bot API.
+#
+#   1) cp .env.example .env и заполни
+#   2) Отвяжи бота от облачного API (ОДИН раз, иначе локальный сервер не примет токен):
+#        curl "https://api.telegram.org/bot<ТОКЕН>/logOut"
+#   3) docker compose up -d --build
+#
+# Хранилище Bot API — именованный volume, смонтированный в ОБА контейнера по одному
+# пути. Режим --local отдаёт в getFile абсолютный путь внутри контейнера, и бот читает
+# файл прямо с диска. Это заодно обходит грабли AI_Host: на Windows bind-mount падал,
+# потому что каталог с именем токена содержит «:».
+
+services:
+  bot:
+    build: .
+    container_name: adreel-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TELEGRAM_API_BASE: http://botapi:8081
+      WORKDIR: /app/workdir
+    volumes:
+      - ./workdir:/app/workdir
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+      - botapi_data:/var/lib/telegram-bot-api
+    depends_on:
+      - botapi
+
+  botapi:
+    image: aiogram/telegram-bot-api:9.1
+    container_name: adreel-botapi
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: 1
+      TELEGRAM_VERBOSITY: 1
+    volumes:
+      - botapi_data:/var/lib/telegram-bot-api
+    healthcheck:
+      # в образе нет curl, есть pgrep (проверено в AI_Host)
+      test: ["CMD-SHELL", "pgrep -f telegram-bot-api >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  botapi_data:

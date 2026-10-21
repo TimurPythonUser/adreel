@@ -1,0 +1,34 @@
+# Секреты — никогда
+.env
+.env.local
+*.pem
+*.key
+
+# Рабочие данные бота: кеши, генерации, замеры темпа, готовые ролики
+workdir/
+logs/
+
+# Медиа: тяжёлые, для кода есть git, для видео — облако
+*.mp4
+*.mov
+*.mp3
+*.wav
+*.m4a
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Редакторы и система
+.vscode/
+.playwright-mcp/
+.idea/
+.DS_Store
+Thumbs.db

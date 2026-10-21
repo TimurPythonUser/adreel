@@ -1,0 +1,212 @@
+# Модели генерации на fal.ai. Сменить модель = поменять VIDEO_MODEL / IMAGE_MODEL в .env
+# или default ниже. Код не трогаем.
+#
+# inputs — как наши поля ложатся в запрос конкретной модели (у разных моделей разные имена).
+# output — путь к URL результата в ответе fal.
+# verified: false — схема входа не проверена живым запросом; проверяется live-тестом.
+#
+# ПРИОРИТЕТ — КАЧЕСТВО РОЛИКА, не цена. Рабочий дефолт — 1080P: монтаж выдаёт
+# 1080x1920, и исходник в 768P пришлось бы растягивать.
+# Поле resolution у H3 описано одинаково на обеих моделях: «1080P latent refinement from
+# a native 768P source». То есть 1080P у турбо и у флагмана получается одинаково, а берёт
+# турбо вдвое меньше — поэтому рабочий дефолт именно турбо.
+#
+# ЧЕРНОВОЙ РЕЖИМ. Пока обкатываем промпты, сценарии и склейки, в .env стоит
+# VIDEO_MODEL=h3-max-turbo-480 ($0.025/с, ролик 20 с ≈ $0.67). На нём смотрим, ЧТО
+# получается — идею, движение, стыки, — а не резкость. Готов к боевому ролику —
+# очисти VIDEO_MODEL в .env, и вернётся дефолт из этого файла.
+#
+# Схема входа H3 сверена 16.09.2026 по OpenAPI fal
+# (fal.ai/api/openapi/queue/openapi.json?endpoint_id=minimax/h3-max/image-to-video):
+#   prompt, prompt_expansion_mode (обязателен), image_url, end_image_url, duration,
+#   resolution [480P|768P|1080P], seed, enable_safety_checker, sync_mode.
+# prompt_expansion_mode: disabled — наш оператор пишет полный промпт в официальном формате
+# H3, и переписыватель fal только размывает контракт «товар не менять».
+
+video:
+  default: h3-max-turbo
+  models:
+    h3-max:
+      title: MiniMax H3 Max (1080P)
+      fal_id: minimax/h3-max/image-to-video
+      mode: image
+      durations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      duration_as_string: false
+      supports_end_frame: true
+      supports_seed: true
+      supports_chain: true          # последний кадр клипа можно отдать стартовым в следующий
+      chain_model: h3-chain         # чем продолжать критичные стыки (см. ниже)
+      # Сверено 15.09.2026: 480P $0.05, 768P $0.08, 1080P $0.16 за секунду.
+      price_per_sec: 0.16
+      inputs:
+        image: image_url
+        end_image: end_image_url
+        prompt: prompt
+        duration: duration
+        seed: seed
+      extra: {resolution: 1080P, prompt_expansion_mode: disabled}
+      output: video.url
+      verified: false
+      max_prompt_chars: 2500
+      prompt_guide: |
+        H3 ждёт не абзац, а ДОКУМЕНТ ИЗ ТРЁХ ПОЛЕЙ (официальный гайд MiniMax-H3).
+        Формат промпта собирает наш код, ты даёшь части. Итог выглядит так:
+
+          For the target video, at 0.00 seconds into the target video, <Picture 1>
+          (from [Shot 1]) is fully referenced.
+
+          integrated_multimodal_description:
+          [Shot 1] <стиль>. <контракт сохранения>. <действие>. The camera pushes in with
+          small amplitude at slow speed. <свет и цвет>. Do not change ... Avoid ...
+
+          overall_soundscape: <звуки в кадре>
+          non_diegetic_music: N/A
+
+        Что это значит для твоих полей:
+        • preserve — контракт сохранения, ИДЁТ ПЕРВЫМ. Для товара: силуэт, пропорции,
+          материал, цвет, упаковка, читаемые детали этикетки. Дословно, что НЕ меняется.
+        • description — одна сцена: стиль, что в кадре, ОДНО наблюдаемое действие,
+          движение камеры, свет. Не пересказывай то, что и так видно на стартовом кадре.
+        • Камера пишется как тип + амплитуда + скорость обычным английским:
+          "The camera arcs clockwise with small amplitude at slow speed".
+          Официальный словарь: Zoom In/Out, Push In/Pull Out, Pan, Truck, Tilt, Pedestal,
+          Arc, Tracking, Static, Shake Slightly/Strongly, POV, Roll.
+        • Меняется только крупность — это движение камеры, а НЕ склейка. Внутри сцены
+          склеек нет: одна сцена = один непрерывный кадр.
+        • avoid — короткий список того, что модель любит испортить. Негативы работают.
+        • soundscape — звуки в кадре одной фразой (в ролик не попадёт: звук мы кладём свой,
+          но поле дисциплинирует физику движения). Музыку модели не заказываем никогда.
+
+        ЧЕГО НЕ ПРОСИТЬ
+        • Текст, надписи, логотипы, цифры, интерфейсы — рисует нечитаемо, дадим оверлеем.
+        • Говорящие лица: наш голос отдельный, губы не совпадут. Нужен человек в кадре —
+          пиши "lips remain completely closed".
+        • Мелкая моторика пальцев, несколько действий подряд, толпа, сложные трюки.
+        • Трансформации, которым нужна геометрия, которой нет на стартовом кадре.
+
+        ЕСЛИ НЕ ВЫХОДИТ (официальный траблшутинг)
+        • Товар плывёт или двоится — медленнее камера, явно зафиксируй количество деталей.
+        • Меняется личность или упаковка — уменьши диапазон действия, убери слова,
+          намекающие на редизайн.
+        • Получается «ожившая фотография» — добавь одно конкретное действие: пар, блик,
+          отклик ткани, отражение.
+        • Конечный кадр приходит рывком — опиши промежуточные состояния пути к нему.
+
+    h3-chain:
+      title: MiniMax H3 Max Reference (бесшовное продолжение)
+      fal_id: minimax/h3-max/reference-to-video
+      mode: reference
+      durations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      supports_end_frame: false
+      supports_seed: true
+      supports_chain: true
+      # Продолжение по КУСКУ ВИДЕО, а не по стоп-кадру: модель видит движение и
+      # продолжает его. Стоп-кадр этого не даёт — камера остаётся стоять там же.
+      # Приём из практики (r/StableDiffusion, техника seamless continuation на H3).
+      price_per_sec: 0.16
+      # Референсы тарифицируются токенами: первые 4096 бесплатно, дальше $0.02 за 1000.
+      # Секунда видео-референса при генерации в 768P — 7459 токенов; для 1080P цифра
+      # не опубликована, поэтому в оценку кладём надбавку с запасом.
+      reference_video_sec: 1.0
+      reference_usd_per_call: 0.30
+      inputs:
+        prompt: prompt
+        duration: duration
+        seed: seed
+        reference_images: reference_image_urls
+        reference_videos: reference_video_urls
+        aspect_ratio: aspect_ratio
+      extra: {resolution: 1080P, prompt_expansion_mode: disabled, aspect_ratio: "9:16"}
+      output: video.url
+      verified: false
+      max_prompt_chars: 2500
+      prompt_guide: |
+        То же, что у h3-max, плюс правила референсов: каждому референсу назначается роль.
+        Наш код сам добавляет в начало промпта строки про <Video 1> (хвост предыдущего
+        клипа) и <Image 1> (фото товара) и дословную формулу продолжения:
+          "Target video is a seamless continuation of <Video 1>.
+           First frame of [Shot 1] is the last frame of <Video 1>."
+        Ты описываешь, что происходит ДАЛЬШЕ, и что обязано остаться прежним.
+
+    h3-max-turbo:
+      title: MiniMax H3 Max Turbo (1080P)
+      fal_id: minimax/h3-max-turbo/image-to-video
+      mode: image
+      durations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      duration_as_string: false
+      supports_end_frame: true
+      supports_seed: true
+      supports_chain: true
+      chain_model: h3-chain
+      # 480P $0.025, 768P $0.04, 1080P $0.08 за секунду (акция закончилась 14.09.2026).
+      price_per_sec: 0.08
+      inputs:
+        image: image_url
+        end_image: end_image_url
+        prompt: prompt
+        duration: duration
+        seed: seed
+      extra: {resolution: 1080P, prompt_expansion_mode: disabled}
+      output: video.url
+      verified: false
+      max_prompt_chars: 2500
+      prompt_guide: |
+        Дистиллированная версия H3 Max: вдвое дешевле при том же 1080P (обе модели
+        доводят 1080P из нативного 768P). Формат промпта и правила — как у h3-max.
+
+    h3-max-turbo-480:
+      title: MiniMax H3 Max Turbo (480P, черновой режим)
+      fal_id: minimax/h3-max-turbo/image-to-video
+      mode: image
+      durations: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      duration_as_string: false
+      supports_end_frame: true
+      supports_seed: true
+      supports_chain: true
+      price_per_sec: 0.025
+      inputs:
+        image: image_url
+        end_image: end_image_url
+        prompt: prompt
+        duration: duration
+        seed: seed
+      extra: {resolution: 480P, prompt_expansion_mode: disabled}
+      output: video.url
+      verified: false
+      max_prompt_chars: 2500
+      prompt_guide: |
+        Самый дешёвый режим: им обкатываем промпты, сценарии и склейки, а не качество
+        картинки. Формат промпта и правила — как у h3-max.
+
+    kling-o3-pro:
+      title: Kling 3.0 Pro
+      fal_id: fal-ai/kling-video/o3/pro/image-to-video
+      mode: image
+      durations: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      duration_as_string: true
+      supports_end_frame: true
+      supports_seed: false
+      price_per_sec: 0.14   # НЕ сверено для o3/pro — проверить на странице модели
+      inputs: {image: image_url, end_image: end_image_url, prompt: prompt, duration: duration}
+      extra: {generate_audio: false}
+      output: video.url
+      verified: false
+      max_prompt_chars: 2000
+      supports_chain: true
+      prompt_guide: |
+        Промпт — один абзац на английском на ОДИН непрерывный кадр: контракт сохранения
+        товара, действие, окружение, свет, движение камеры, стиль.
+        Kling держит форму предмета, но текст и логотипы всё равно плывут — надписи
+        добавим оверлеем. Не пиши "cut to" и "next scene": это один кадр.
+
+image:
+  default: nano-banana-2-edit
+  models:
+    nano-banana-2-edit:
+      title: Nano Banana 2 Edit
+      fal_id: fal-ai/nano-banana-2/edit
+      price_per_image: 0.04
+      inputs: {images: image_urls, prompt: prompt, aspect_ratio: aspect_ratio}
+      extra: {num_images: 1, output_format: png}
+      output: images.0.url
+      verified: false
