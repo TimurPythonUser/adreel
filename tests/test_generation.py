@@ -113,7 +113,7 @@ async def world(tmp_path):
     await engine.dispose()
 
 
-async def prepare(products, scripts, llm, *, shots_plan=None, seamless=False):
+async def prepare(products, scripts, llm, *, shots_plan=None, seamless=False, script=None):
     pid = await products.new_draft(1, "uk")
     await products.save_card(pid, CARD)
     await products.add_photo(pid, solid_png(1000, 1000, (200, 60, 60)))
@@ -121,9 +121,10 @@ async def prepare(products, scripts, llm, *, shots_plan=None, seamless=False):
     project_id = await scripts.start_project(pid)
     await scripts.choose_direction(project_id, Direction.model_validate(DIRECTION))
     await scripts.set_duration(project_id, 20)
-    script = good_script()
+    script = script or good_script()
     for sh in script["shots"]:
-        sh["photo_ref"] = photo_id
+        if sh["source"] != "story_scene":
+            sh["photo_ref"] = photo_id
     llm.responses = [script]
     await scripts.make_script(project_id)
     llm.responses = [shots_plan or plans_for(photo_id, seamless=seamless)]
@@ -198,7 +199,8 @@ async def test_generate_all_shots_in_order(world):
     await gen.generate(project_id, progress=progress)
 
     assert len(imagegen.calls) == 1                     # картинка нужна только сцене 3
-    assert imagegen.calls[0].startswith("Keep the product from the reference image")
+    assert "Image 1 is the product" in imagegen.calls[0]  # роль референса названа
+    assert imagegen.refs == [1]                          # героя в сцене 3 нет — только товар
     assert [d for _, d in videogen.calls] == [5, 5, 5, 5, 5]
     prompt = videogen.calls[0][0]
     assert "integrated_multimodal_description:" in prompt   # официальный формат H3
@@ -211,6 +213,94 @@ async def test_generate_all_shots_in_order(world):
     assert [r.shot_n for r in rows] == [1, 2, 3, 4, 5]
     assert all(r.status == "ready" and r.clip_path and r.frame_path for r in rows)
     assert await gen.ready(project_id)
+
+
+def story_world() -> tuple[dict, dict]:
+    """Сцена 1 — Олена в машине без товара, сцена 3 — снова Олена, уже с товаром."""
+    script = good_script()
+    script["shots"][0].update(source="story_scene", photo_ref=None)
+    script["shots"][2]["cast"] = ["Олена"]
+
+    def p(n, start, end="none"):
+        return {"n": n, "preserve": KEEP, "description": EN, "avoid": "", "soundscape": "",
+                "start_from": start, "chain": "frame", "end_with": end, "transition": "cut",
+                "cut_note": "", "group_with_prev": False}
+
+    plans = {"style_anchor": "cinematic 35mm, warm palette",
+             "shots": [p(1, "generated_scene"), p(2, "generated_scene"),
+                       p(3, "generated_scene"), p(4, "prev_last_frame"),
+                       p(5, "product_photo", "product_photo")]}
+    return script, plans
+
+
+async def test_story_scene_is_drawn_without_the_product(world):
+    """Урок 22.10.2026: фото товара уходило в каждую картинку — товар был в каждом кадре."""
+    w = world
+    script, plans = story_world()
+    _, project_id, _ = await prepare(w.products, w.scripts, w.llm, script=script,
+                                     shots_plan=plans)
+    await w.gen.generate(project_id)
+
+    assert w.imagegen.refs == [0, 1, 2]
+    first, second, third = w.imagegen.calls
+    assert "does not appear in this frame" in first and "Олена: жінка 30 років" in first
+    assert "Image 1 is the product" in second and "Олена" not in second
+    # Олена снова в кадре: её первая картинка ушла референсом — один человек на весь ролик
+    assert "Image 2 shows Олена: the same person" in third
+    assert "cinematic 35mm" in third                      # общий стиль и в картинках
+
+
+async def test_hero_survives_a_failed_generation(world):
+    """После сбоя героиню не рисуют заново: её картинку берут из уже снятой сцены."""
+    w = world
+    script, plans = story_world()
+    _, project_id, _ = await prepare(w.products, w.scripts, w.llm, script=script,
+                                     shots_plan=plans)
+    real = w.gen.d.videogen
+    calls = 0
+
+    async def boom(image, prompt, duration, end_image=None, seed=None, progress=None):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("fal упал")
+        return await w.videogen.image_to_video(image, prompt, duration, seed=seed)
+
+    w.gen.d.videogen = lambda: type("V", (), {"image_to_video": staticmethod(boom),
+                                              "can_continue": False})()
+    with pytest.raises(GenerationError):
+        await w.gen.generate(project_id)
+    w.gen.d.videogen = real
+    w.imagegen.refs.clear()
+    w.imagegen.calls.clear()
+    await w.gen.generate(project_id)
+    # сцена 2 — оплаченная картинка из БД, сцена 3 — с референсом Олены из сцены 1
+    assert w.imagegen.refs == [2]
+
+
+async def test_tail_window_takes_the_end_of_the_clip(tmp_path):
+    """Клип 5 с, сцена 2 с: без хвоста монтаж брал начало и отрезал смаз в конце клипа."""
+    clip = tmp_path / "red_then_blue.mp4"
+    await ffmpeg.run(["-f", "lavfi", "-i", "color=c=red:s=180x320:d=2.5:r=30",
+                      "-f", "lavfi", "-i", "color=c=blue:s=180x320:d=2.5:r=30",
+                      "-filter_complex", "[0][1]concat=n=2:v=1:a=0", "-pix_fmt", "yuv420p",
+                      str(clip)])
+
+    async def colour(tail: bool) -> tuple[int, ...]:
+        work = tmp_path / ("tail" if tail else "head")
+        work.mkdir()
+        seg = (await montage._segments([montage.ShotClip(1, clip, 2.0, tail=tail)], work))[0]
+        png = await ffmpeg.run(["-ss", "1.0", "-i", str(seg), "-frames:v", "1", "-f", "image2",
+                                "-c:v", "png", "pipe:1"])
+        import io
+
+        from PIL import Image
+        with Image.open(io.BytesIO(png)) as im:
+            return im.convert("RGB").getpixel((im.width // 2, im.height // 2))
+
+    head, tail = await colour(False), await colour(True)
+    assert head[0] > 150 and head[2] < 100           # начало клипа — красное
+    assert tail[2] > 150 and tail[0] < 100           # конец клипа — синий
 
 
 async def test_chained_shot_starts_from_previous_clip(world):

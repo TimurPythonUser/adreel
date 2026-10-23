@@ -146,9 +146,32 @@ class FalGateway:
 
 
 class FalImageGen:
-    def __init__(self, gateway: FalGateway, model: ImageModel) -> None:
+    def __init__(self, gateway: FalGateway, model: ImageModel,
+                 text_model: ImageModel | None = None) -> None:
         self.gw = gateway
         self.model = model
+        self.text_model = text_model
+
+    async def generate(
+        self,
+        prompt: str,
+        aspect_ratio: str | None = None,
+        progress: Progress | None = None,
+    ) -> bytes:
+        model = self.text_model
+        if model is None:
+            raise GenerationFailed("нет модели картинок по тексту (image.text_default в "
+                                   "config/video_models.yaml)")
+        key = fingerprint(model.fal_id, prompt=prompt, aspect=aspect_ratio)
+
+        async def build() -> dict[str, Any]:
+            return model.arguments(image_urls=[], prompt=prompt, aspect_ratio=aspect_ratio)
+
+        res = await self.gw.run(model.fal_id, key, build, progress)
+        data = await net.download(pick(res, model.output), who="fal (картинка по тексту)")
+        costs.record("fal", model.key, 1, "image", model.price_per_image)
+        await self.gw.done(key)
+        return data
 
     async def edit(
         self,

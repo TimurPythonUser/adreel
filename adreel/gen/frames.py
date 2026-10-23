@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from dataclasses import dataclass
 
 from PIL import Image, ImageStat
 
@@ -83,22 +84,66 @@ async def tail_clip(clip: bytes, seconds: float) -> bytes:
     return await ffmpeg.tail_video(clip, seconds)
 
 
-async def make_scene(imagegen: ImageGenProvider, product_photo: bytes, prompt: str,
+#: что не менять в товаре. Урок из ТЗ: генеративные модели любят «улучшить» упаковку
+#: и надписи — тогда в рекламе окажется не тот товар, который продаём
+PRODUCT_CONTRACT = ("Keep it exactly as it is: same shape, proportions, colors, materials, "
+                    "label and packaging, same number of parts. Do not redesign it, do not add "
+                    "or change any text or logo.")
+
+
+@dataclass(frozen=True)
+class Person:
+    """Герой в кадре. frame — его первая картинка: уходит референсом, чтобы во всех
+    сценах был один человек. None — герой появляется впервые, рисуем по описанию."""
+
+    name: str
+    look: str
+    frame: bytes | None = None
+
+
+async def make_scene(imagegen: ImageGenProvider, prompt: str, *, product: bytes | None = None,
+                     people: list[Person] | None = None, style: str = "",
                      progress: Progress | None = None) -> bytes:
-    """Сцена с товаром: реальное фото уходит референсом, чтобы товар не исказился."""
-    scene = await imagegen.edit([ImageInput(await vertical(product_photo), "image/jpeg")],
-                                _scene_prompt(prompt), aspect_ratio=ASPECT, progress=progress)
-    return await vertical(scene)
+    """Стартовый кадр сцены.
+
+    product — фото товара, если товар в кадре: форма товара держится по референсу.
+    Сцена без товара рисуется БЕЗ фото товара — раньше оно уходило в каждую картинку,
+    и товар оказывался в каждом кадре: ролик выходил одинаковым (урок 22.10.2026).
+    Референсов нет совсем — картинка по тексту.
+    """
+    images: list[ImageInput] = []
+    refs: list[str] = []
+    if product is not None:
+        images.append(ImageInput(await vertical(product), "image/jpeg"))
+        refs.append(f"Image {len(images)} is the product. {PRODUCT_CONTRACT}")
+    for p in people or []:
+        if p.frame is not None:
+            images.append(ImageInput(p.frame, "image/jpeg"))
+            refs.append(f"Image {len(images)} shows {p.name}: the same person — keep the face, "
+                        "age, hairstyle, body and outfit identical.")
+    text = _scene_prompt(prompt, refs, people or [], style, with_product=product is not None)
+    if images:
+        raw = await imagegen.edit(images, text, aspect_ratio=ASPECT, progress=progress)
+    else:
+        raw = await imagegen.generate(text, aspect_ratio=ASPECT, progress=progress)
+    return await vertical(raw)
 
 
-def _scene_prompt(prompt: str) -> str:
-    """Контракт сохранения идёт ПЕРВЫМ, дальше — что нового в кадре.
+def _scene_prompt(scene: str, refs: list[str], people: list[Person], style: str, *,
+                  with_product: bool) -> str:
+    """Роли референсов идут ПЕРВЫМИ, дальше — что нового в кадре.
 
     Так просит официальный гайд H3 и так же ведут себя модели картинок: первое
-    требование весит больше хвоста. Урок из ТЗ: генеративные модели любят «улучшить»
-    упаковку и надписи — тогда в рекламе окажется не тот товар, который продаём.
+    требование весит больше хвоста. Внешность героя — той же фразой, что в сценарии,
+    в каждой его сцене: одинаковое описание держит одного человека.
     """
-    return ("Keep the product from the reference image exactly as it is: same shape, "
-            "proportions, colors, materials, label and packaging, same number of parts. "
-            "Do not redesign it, do not add or change any text or logo. "
-            f"Vertical 9:16 composition. Scene: {prompt.rstrip('. ')}.")
+    parts = ["Vertical 9:16 photorealistic film still from a commercial.", *refs]
+    parts += [f"{p.name}: {p.look.rstrip('. ')}." for p in people]
+    parts.append(f"Scene: {scene.rstrip('. ')}.")
+    if not with_product:
+        parts.append("The advertised product does not appear in this frame.")
+    if style:
+        parts.append(f"Look: {style.rstrip('. ')}.")
+    parts.append("Do not add captions, watermarks or any text beyond what is printed on "
+                 "objects.")
+    return " ".join(parts)

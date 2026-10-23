@@ -17,7 +17,7 @@ from adreel.research.fake import FakeSearch
 from adreel.research.notes import ResearchNotes, collect, queries
 from adreel.research.search import SearchHit
 from adreel.script import shots
-from adreel.script.creative import Brief, Direction, ScriptError
+from adreel.script.creative import FIX_ROUNDS, Brief, Direction, ScriptError
 from adreel.script.schema import VideoScript
 from adreel.script.service import ScriptService
 from adreel.script.shots import ShotPlans
@@ -53,6 +53,63 @@ def check(raw):
 
 def test_good_plan_passes():
     assert check(good_plans()) == []
+
+
+WIPE_OUT = (EN + " A passer-by crosses right in front of the lens, filling the frame.")
+WIPE_IN = ("A dark foreground shape slides out of frame, revealing the kitchen. " + EN)
+
+
+def test_object_wipe_is_asked_on_both_sides():
+    bad = plans(plan(1, "product_photo", transition="object_wipe"), plan(2), plan(3), plan(4),
+                plan(5, "product_photo"))
+    text = " | ".join(check(bad))
+    assert "сцена 1: object_wipe" in text and "сцена 2: object_wipe" in text
+    ok = plans(plan(1, "product_photo", transition="object_wipe", prompt=WIPE_OUT),
+               plan(2, prompt=WIPE_IN), plan(3), plan(4), plan(5, "product_photo"))
+    assert check(ok) == []
+
+
+def test_clip_window_follows_the_transition():
+    """Клип 5 с, сцена 2.5 с: смаз в хвосте и продолжение со стоп-кадра требуют КОНЕЦ клипа."""
+    p = ShotPlans.model_validate(good_plans())
+    assert p.needs_tail(1)            # со последнего кадра сцены 1 стартует сцена 2
+    assert not p.needs_tail(2) and p.needs_tail(3)
+    assert p.needs_tail(5)            # конечный кадр — фото товара
+    whip = ShotPlans.model_validate(plans(
+        plan(1, "product_photo", transition="whip_pan"), plan(2), plan(3), plan(4), plan(5)))
+    assert whip.needs_tail(1) and whip.needs_head(2) and not whip.needs_head(3)
+
+
+def test_head_and_tail_in_one_short_scene_are_refused():
+    whip_in = EN + " The camera decelerates from a fast rightward pan, motion blur settling."
+    whip_out = EN + " The camera whips quickly to the right, motion blur."
+    # сцена 2 (4 с из клипа 5 с) входит из смаза и сама нужна с конца — сцена 3 её продолжает
+    bad = plans(plan(1, "product_photo", transition="whip_pan", prompt=whip_out),
+                plan(2, prompt=whip_in), plan(3, "prev_last_frame"), plan(4), plan(5))
+    assert any("оба края не поместятся" in e for e in check(bad))
+
+
+def test_story_scene_cannot_start_from_the_product_photo():
+    script = good_script()
+    script["shots"][1].update(source="story_scene", photo_ref=None)
+    story = VideoScript.model_validate(script)
+    bad = plans(plan(1, "product_photo"), plan(2, "product_photo"), plan(3), plan(4),
+                plan(5, "product_photo"))
+    errors = shots.check_plans(ShotPlans.model_validate(bad), story, MODEL)
+    assert any("сцена 2: в ней нет товара" in e for e in errors)
+
+
+def test_pacing_tells_the_model_when_the_action_happens():
+    assert shots.pacing_line(4.6, 5, tail=False) == ""            # клип почти как сцена
+    head = shots.pacing_line(2.5, 5, tail=False)
+    tail = shots.pacing_line(2.5, 5, tail=True)
+    assert "first 2.5 seconds" in head and "final 2.5 seconds" in tail
+    p = ShotPlans.model_validate(good_plans())
+    prompt = p.group_prompt([p.plan_for(3)], [0.0], duration=5, pacing=head)
+    assert head in prompt
+    seamless = p.group_prompt([p.plan_for(2)], [0.0], duration=5, reference=True,
+                              product_ref=False)
+    assert "<Video 1>" in seamless and "<Image 1>" not in seamless   # сцена без товара
 
 
 def test_first_shot_cannot_continue_previous():
@@ -168,7 +225,7 @@ async def test_agent_fixes_plan_after_errors():
 
 async def test_agent_gives_up_with_reason():
     broken = plans(plan(1, "prev_last_frame"), plan(2), plan(3), plan(4), plan(5))
-    llm = FakeLLM([broken, broken, broken])
+    llm = FakeLLM([broken] * (FIX_ROUNDS + 1))
     with pytest.raises(ScriptError, match="сцена 1"):
         await shots.plan_shots(llm, Brief(CARD, [], []), Direction.model_validate(DIRECTION),
                                SCRIPT, MODEL)

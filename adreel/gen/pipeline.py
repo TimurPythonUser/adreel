@@ -40,7 +40,7 @@ from ..progress import say
 from ..render import ffmpeg, montage
 from ..script.schema import Shot, VideoScript
 from ..script.service import ScriptService
-from ..script.shots import ShotPlan, ShotPlans
+from ..script.shots import ShotPlan, ShotPlans, pacing_line
 from ..tts.base import TTSProvider
 from . import frames
 from .base import ImageGenProvider, ImageInput, Progress, VideoGenProvider
@@ -127,6 +127,9 @@ class _Plan:
     photos: dict[int, bytes] = field(default_factory=dict)
     #: первый кадр ролика — эталон палитры для продолжающих сцен (против дрейфа цвета)
     anchor: bytes | None = None
+    #: первая картинка каждого героя — референс в его следующие сцены: один человек
+    #: через весь ролик, а не новый в каждом кадре
+    cast_frames: dict[str, bytes] = field(default_factory=dict)
 
 
 #: статусы, при которых у сцены есть оплаченный стартовый кадр, но нет готового клипа
@@ -229,8 +232,9 @@ class GenerationService:
             groups = [g for g in groups if only in g.numbers]
             if not groups:
                 raise GenerationError(f"сцены {only} нет в сценарии")
-        else:
-            rows = await self._rows(project_id)
+        rows = await self._rows(project_id)
+        await self._restore_cast(plan, rows, skip=only)
+        if only is None:
             todo = self._not_ready(groups, rows)
             # Первая генерация уже готова — её кадр остаётся якорем палитры: продолжающие
             # сцены после сбоя должны тянуться к тому же цвету, что и до него.
@@ -270,6 +274,10 @@ class GenerationService:
         shot_seed = seed + shot.n
         seamless = self._is_reference(sp, vmodel) and videogen.can_continue
 
+        # Клип длиннее сцены — модели надо сказать, когда случается действие: монтаж
+        # возьмёт только начало или только конец клипа (shots.pacing_line)
+        pacing = (pacing_line(shot.duration_sec, duration, plan.plans.needs_tail(shot.n))
+                  if len(group.shots) == 1 else "")
         prev = await self._clip_bytes(plan.project.id, shot.n - 1) if seamless else None
         if seamless and prev is not None:
             chain = self._chain_model(vmodel)
@@ -277,9 +285,12 @@ class GenerationService:
             await say(progress, f"🎬 Сцена {shot.n}: бесшовно продолжаю предыдущую "
                                  f"({duration} с)…")
             tail = await frames.tail_clip(prev, tail_sec)
-            refs = [ImageInput(await frames.vertical(self._photo(plan, shot)), "image/jpeg")]
+            # в сцене без товара фото товара в референсах только навредит
+            refs = ([ImageInput(await frames.vertical(self._photo(plan, shot)), "image/jpeg")]
+                    if shot.has_product else [])
             prompt = plan.plans.group_prompt(group.plans, group.offsets, duration=duration,
-                                             reference=True)
+                                             reference=True, pacing=pacing,
+                                             product_ref=shot.has_product)
             frame = await frames.last_frame(prev, plan.anchor)   # кадр для отчётности и стыка
             before = spent.total_usd
             clip = await videogen.continue_video(tail, refs, prompt, duration,
@@ -297,7 +308,7 @@ class GenerationService:
             # конечный кадр прибивается к финалу ПОСЛЕДНЕЙ сцены генерации
             end_image = await self._end_frame(plan, group.shots[-1], group.plans[-1])
             prompt = plan.plans.group_prompt(group.plans, group.offsets, duration=duration,
-                                             end_image=end_image is not None)
+                                             end_image=end_image is not None, pacing=pacing)
             await say(progress, f"🎬 Сцена {shot.n}: генерирую {duration} с на {vmodel.title}…")
             before = spent.total_usd
             clip = await videogen.image_to_video(
@@ -307,6 +318,7 @@ class GenerationService:
 
         if plan.anchor is None:
             plan.anchor = frame          # первый кадр ролика задаёт палитру остальным
+        self._remember_cast(plan, shot, frame)
         return await self._save_group(plan, group, frame, clip, prompt, model_key,
                                       spent.total_usd - before, shot_seed)
 
@@ -318,7 +330,7 @@ class GenerationService:
         Модель режет по нашим таймкодам, но попадает в них не идеально — кусок берём
         по плану сценария, лишний кадр на стыке всё равно срежет монтаж.
         """
-        pieces = await self._split(clip, group)
+        pieces = await self._split(plan, clip, group)
         share = round(usd / len(group.shots), 6)
         out: list[ClipResult] = []
         for i, shot in enumerate(group.shots):
@@ -330,11 +342,18 @@ class GenerationService:
             out.append(ClipResult(shot.n, pieces[i], shot.duration_sec, share, note))
         return out
 
-    async def _split(self, clip: bytes, group: _Group) -> list[bytes]:
+    async def _split(self, plan: _Plan, clip: bytes, group: _Group) -> list[bytes]:
         if len(group.shots) == 1:
             return [clip]               # одна сцена — клип идёт в монтаж как есть
-        return [await ffmpeg.cut_clip(clip, start, shot.duration_sec)
-                for start, shot in zip(group.offsets, group.shots, strict=True)]
+        pieces: list[bytes] = []
+        last = len(group.shots) - 1
+        for i, (start, shot) in enumerate(zip(group.offsets, group.shots, strict=True)):
+            if i == last and plan.plans.needs_tail(shot.n):
+                # хвост генерации нужен целиком: там переход или с последнего кадра
+                # стартует следующая сцена — иначе на стыке скачок
+                start = max(start, group.duration - shot.duration_sec)
+            pieces.append(await ffmpeg.cut_clip(clip, start, shot.duration_sec))
+        return pieces
 
     async def _seed(self, project: Project) -> int:
         """Сид ролика: один на все сцены, живёт в проекте."""
@@ -356,11 +375,42 @@ class GenerationService:
             if prev is not None:
                 # палитру тянем к первому кадру ролика: иначе цепочка уползает в цвете
                 return await frames.last_frame(prev, plan.anchor)
-            log.warning("сцена %s: предыдущего клипа нет, беру фото товара", shot.n)
-        photo = self._photo(plan, shot)
-        if sp.start_from == "generated_scene":
-            return await frames.make_scene(self.d.imagegen(), photo, shot.visual, progress)
-        return await frames.vertical(photo)
+            log.warning("сцена %s: предыдущего клипа нет, рисую стартовый кадр заново", shot.n)
+        if sp.start_from == "generated_scene" or not shot.has_product:
+            # Сцена без товара рисуется без фото товара: иначе товар лез в каждый кадр
+            return await frames.make_scene(
+                self.d.imagegen(), shot.visual,
+                product=self._photo(plan, shot) if shot.has_product else None,
+                people=self._people(plan, shot), style=plan.plans.style_anchor,
+                progress=progress)
+        return await frames.vertical(self._photo(plan, shot))
+
+    @staticmethod
+    def _people(plan: _Plan, shot: Shot) -> list[frames.Person]:
+        out = []
+        for name in shot.cast:
+            member = plan.script.member(name)
+            out.append(frames.Person(name, member.look if member else name,
+                                     plan.cast_frames.get(name)))
+        return out
+
+    @staticmethod
+    def _remember_cast(plan: _Plan, shot: Shot, frame: bytes) -> None:
+        """Первая картинка героя — его референс на весь ролик."""
+        for name in shot.cast:
+            plan.cast_frames.setdefault(name, frame)
+
+    async def _restore_cast(self, plan: _Plan, rows: dict[int, Clip],
+                            skip: int | None = None) -> None:
+        """После сбоя или при пересъёмке сцены герой должен остаться тем же: его первую
+        картинку берём из уже снятых сцен, а не рисуем нового человека."""
+        for shot in plan.script.shots:
+            row = rows.get(shot.n)
+            if shot.n == skip or row is None or not row.frame_path:
+                continue
+            for name in shot.cast:
+                if name not in plan.cast_frames:
+                    plan.cast_frames[name] = await self.d.media.read_async(row.frame_path)
 
     async def _end_frame(self, plan: _Plan, shot: Shot, sp: ShotPlan) -> ImageInput | None:
         """Конечный кадр: прибиваем финал клипа к нужной картинке (модель дорисует переход)."""
@@ -372,6 +422,8 @@ class GenerationService:
                 return None
             data = await self._frame_bytes(plan.project.id, nxt.n)
             if data is None:
+                if not nxt.has_product:
+                    return None       # кадра следующей сцены ещё нет, а фото товара — не он
                 data = await frames.vertical(self._photo(plan, nxt))
             return ImageInput(data, "image/jpeg")
         return None
@@ -486,6 +538,7 @@ class GenerationService:
             n=s.n, path=self.d.media.path(rows[s.n].clip_path), duration=s.duration_sec,
             chained=(plan.plans.plan_for(s.n).start_from == "prev_last_frame"
                      and not plan.plans.plan_for(s.n).group_with_prev),
+            tail=plan.plans.needs_tail(s.n),
             on_screen_text=s.on_screen_text) for s in plan.script.shots]
 
         await say(progress, "🎙 Озвучиваю и клею ролик…")

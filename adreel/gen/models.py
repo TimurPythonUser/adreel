@@ -113,6 +113,9 @@ class ImageModel(BaseModel):
     key: str
     title: str
     fal_id: str
+    #: edit — по референсам (фото товара, первая картинка героя); text — только по промпту,
+    #: для сцен без товара и героя
+    mode: Literal["edit", "text"] = "edit"
     price_per_image: float
     inputs: dict[str, str]
     extra: dict[str, Any] = Field(default_factory=dict)
@@ -122,7 +125,10 @@ class ImageModel(BaseModel):
     def arguments(self, *, image_urls: list[str], prompt: str,
                   aspect_ratio: str | None = None) -> dict[str, Any]:
         args: dict[str, Any] = dict(self.extra)
-        args[self.inputs["images"]] = image_urls
+        if self.mode == "edit":
+            args[self.inputs["images"]] = image_urls
+        elif image_urls:
+            raise ValueError(f"{self.title}: модель рисует только по тексту, референсы не берёт")
         args[self.inputs["prompt"]] = prompt
         if aspect_ratio and "aspect_ratio" in self.inputs:
             args[self.inputs["aspect_ratio"]] = aspect_ratio
@@ -147,6 +153,18 @@ def video_model(key: str | None = None) -> VideoModel:
 def image_model(key: str | None = None) -> ImageModel:
     sec = _section("image")
     key = key or settings.image_model or sec["default"]
+    if key not in sec["models"]:
+        raise KeyError(f"модели картинок {key!r} нет в config/video_models.yaml")
+    return ImageModel(key=key, **sec["models"][key])
+
+
+def text_image_model() -> ImageModel | None:
+    """Картинка только по тексту — стартовый кадр сцены без товара и без героя-референса.
+    Не задана в конфиге — такие сцены рисует edit-модель от кадра героя или не рисует."""
+    sec = _section("image")
+    key = sec.get("text_default")
+    if not key:
+        return None
     if key not in sec["models"]:
         raise KeyError(f"модели картинок {key!r} нет в config/video_models.yaml")
     return ImageModel(key=key, **sec["models"][key])

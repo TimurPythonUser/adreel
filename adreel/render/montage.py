@@ -38,6 +38,9 @@ class ShotClip:
     duration: float          # сколько секунд этой сцены идёт в ролик
     chained: bool = False    # сцена продолжает предыдущую
     on_screen_text: str = ""
+    #: брать КОНЕЦ клипа, а не начало: там переход или с последнего кадра стартует
+    #: следующая сцена (ShotPlans.needs_tail)
+    tail: bool = False
 
 
 @dataclass
@@ -122,6 +125,11 @@ async def _segments(clips: list[ShotClip], workdir: Path) -> list[Path]:
     for clip in clips:
         dst = workdir / f"seg{clip.n:02d}.mp4"
         start = CHAIN_TRIM if clip.chained else 0.0
+        if clip.tail:
+            # Клип длиннее сцены, а нужен его конец: там смаз, шторка или кадр, с которого
+            # стартует следующая сцена. Начало клипа отрезало бы их (урок 23.10.2026)
+            length = (await ffmpeg.probe(clip.path)).duration
+            start = max(start, length - clip.duration)
         vf = (f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
               f"crop={WIDTH}:{HEIGHT},fps={FPS},setsar=1,"
               f"tpad=stop_mode=clone:stop_duration={PAD_SEC}")

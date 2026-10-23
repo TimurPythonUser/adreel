@@ -22,8 +22,10 @@ from .schema import Direction, Directions, VideoScript, Voiceover
 
 log = logging.getLogger("adreel.script.creative")
 
-#: сколько раз модель переделывает ответ, не прошедший проверку
-FIX_ROUNDS = 2
+#: сколько раз модель переделывает ответ, не прошедший проверку. С правилами про события
+#: и разнообразие (23.10.2026) их стало больше — лишний вызов LLM стоит центы, а отказ
+#: «агент не уложился в правила» стоит владельцу ещё одного захода
+FIX_ROUNDS = 3
 LANG = {"uk": "украинский", "ru": "русский", "en": "английский"}
 
 
@@ -117,25 +119,22 @@ async def propose_directions(llm: LLMProvider, brief: Brief, *, count: int = 4,
     system = prompts.render("creative_directions", count=count,
                             duration_hint="15–30 секунд", language=LANG[card.language],
                             category_hints=_hints(card), wishes=wishes_block,
-                            playbook=playbook.block("model_can", "model_cannot", "rhythm"))
+                            playbook=playbook.block("story", "model_can", "model_cannot",
+                                                    "rhythm", "lessons"))
     user = brief_message(brief, f"Предложи {count} направления.")
-
-    def check(d: Directions) -> list[str]:
-        titles = [x.title.strip().lower() for x in d.directions]
-        errors = []
-        if len(d.directions) < min(count, 3):
-            errors.append(f"нужно {count} направлений, а пришло {len(d.directions)}")
-        if len(set(titles)) != len(titles):
-            errors.append("направления повторяются — сделай их разными")
-        return errors
-
-    return await parse_checked(llm, system, user, Directions, check, max_tokens=6000)
+    return await parse_checked(llm, system, user, Directions,
+                               lambda d: validate.check_directions(d, count), max_tokens=8000)
 
 
 async def own_direction(llm: LLMProvider, brief: Brief, idea: str) -> Direction:
-    system = prompts.render("creative_own", language=LANG[brief.card.language])
-    return await llm.parse(system, brief_message(brief, f"Идея владельца: {idea}"), Direction,
-                           max_tokens=3000)
+    system = prompts.render("creative_own", language=LANG[brief.card.language],
+                            playbook=playbook.block("story", "model_can", "model_cannot"))
+
+    def check(d: Direction) -> list[str]:
+        return validate.check_directions(Directions(directions=[d]), 1)
+
+    return await parse_checked(llm, system, brief_message(brief, f"Идея владельца: {idea}"),
+                               Direction, check, max_tokens=4000)
 
 
 # ---------- режиссёр ----------
@@ -186,8 +185,9 @@ def _shots_block(script: VideoScript, chars_per_sec: float) -> str:
         limit = validate.char_limit(s.duration_sec, chars_per_sec)
         star = " ⭐главный" if s.n == script.key_shot else ""
         text = f" · надпись «{s.on_screen_text}»" if s.on_screen_text else ""
+        event = f" · событие: {s.event}" if s.event else ""
         rows.append(f"{s.n} · {s.duration_sec} с · до {limit} симв · {s.role}{star} · "
-                    f"{s.visual}{text}")
+                    f"{s.visual}{event}{text}")
     return "\n".join(rows)
 
 

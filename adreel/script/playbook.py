@@ -13,6 +13,8 @@ from typing import Any
 from ..config import load_yaml
 
 TITLES = {
+    "story": "СЮЖЕТ: ИСТОРИЯ, А НЕ НАБОР КРАСИВЫХ ПЛАНОВ",
+    "coverage": "РАСКАДРОВКА: КАЖДАЯ СЦЕНА — СОБЫТИЕ",
     "model_can": "ЧТО ВИДЕОМОДЕЛЬ ДЕЛАЕТ ХОРОШО",
     "model_cannot": "ЧТО ВИДЕОМОДЕЛЬ НЕ ВЫТЯНЕТ — не строй на этом сцены",
     "transitions": "ЧЕМ СКЛЕИВАЮТ СЦЕНЫ",

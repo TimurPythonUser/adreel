@@ -28,6 +28,8 @@ class FakeImageGen:
     width: int = 1080
     height: int = 1920
     calls: list[str] = field(default_factory=list)
+    #: сколько референсов ушло в каждый вызов (0 — картинка по тексту)
+    refs: list[int] = field(default_factory=list)
     #: как у настоящего: каждый вызов пишет стоимость — проверяем учёт затрат
     usd_per_image: float = 0.0
 
@@ -39,8 +41,20 @@ class FakeImageGen:
         progress: Progress | None = None,
     ) -> bytes:
         self.calls.append(prompt)
+        self.refs.append(len(images))
         costs.record("fake", "image", 1, "image", self.usd_per_image)
         return solid_png(self.width, self.height)
+
+    async def generate(
+        self,
+        prompt: str,
+        aspect_ratio: str | None = None,
+        progress: Progress | None = None,
+    ) -> bytes:
+        self.calls.append(prompt)
+        self.refs.append(0)
+        costs.record("fake", "image", 1, "image", self.usd_per_image)
+        return solid_png(self.width, self.height, (90, 90, 140))
 
 
 @dataclass

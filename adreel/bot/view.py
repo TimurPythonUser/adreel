@@ -148,16 +148,22 @@ ROLE_TITLES = {"hook": "ХУК", "problem": "проблема", "solution": "р�
                "benefit": "выгода", "demo": "демо", "proof": "доказательство",
                "offer": "оффер", "cta": "призыв"}
 SOURCE_TITLES = {"product_photo": "фото товара", "generated_scene": "сцена с товаром",
-                 "end_card": "финальная карточка"}
+                 "story_scene": "сцена без товара", "end_card": "финальная карточка"}
+SIZE_TITLES = {"wide": "общий план", "medium": "средний план", "close": "крупный план",
+               "macro": "деталь"}
 
 
 def directions_text(directions: list[Direction]) -> str:
     out = ["🎨 <b>Креативщик предлагает направления</b>\n"]
     for i, d in enumerate(directions, start=1):
+        beats = "".join(f"\n   {k}) {escape(b)}" for k, b in enumerate(d.beats, start=1))
+        who = f"\n👤 {escape(d.cast)}" if d.cast else ""
+        where = f"\n📍 {escape(d.world)}" if d.world else ""
         out.append(
             f"<b>{i}. {escape(d.title)}</b> · <i>{escape(d.format)}</i>\n"
             f"🪝 <b>Хук:</b> {escape(d.hook)}\n"
-            f"💡 {escape(d.idea)}\n"
+            f"💡 {escape(d.idea)}"
+            + (f"\n🎞 <b>Сюжет:</b>{beats}" if beats else "") + f"{who}{where}\n"
             f"🎥 {escape(d.visual_style)}\n"
             f"🎙 Голос: {escape(d.voice_tone)} · 🎵 {escape(d.music_mood)}\n"
             f"✅ {escape(d.why_it_works)}"
@@ -191,16 +197,22 @@ def script_text(script: VideoScript) -> list[str]:
     s = script
     head = (f"🎬 <b>Сценарий видео: {escape(s.title)}</b>\n"
             f"Длина {s.total:g} с · сцен {len(s.shots)}")
+    if s.cast:
+        head += "\n" + "\n".join(f"👤 <b>{escape(c.name)}</b>: {escape(c.look)}" for c in s.cast)
     blocks, t = [head], 0.0
     for shot in s.shots:
         star = " ⭐ <b>главный кадр</b>" if shot.n == s.key_shot else ""
         text = f"\n🔤 Надпись: «{escape(shot.on_screen_text)}»" if shot.on_screen_text else ""
         ref = f" #{shot.photo_ref}" if shot.photo_ref else ""
+        event = f"\n⚡ {escape(shot.event)}" if shot.event else ""
+        where = " · ".join(x for x in (SIZE_TITLES.get(shot.shot_size, ""),
+                                       escape(shot.location),
+                                       escape(", ".join(shot.cast))) if x)
         blocks.append(
             f"<b>{shot.n}</b> · {t:g}–{t + shot.duration_sec:g} с · "
             f"{ROLE_TITLES.get(shot.role, shot.role)}{star}\n"
-            f"🖼 {escape(shot.visual)}\n"
-            f"🎥 {escape(shot.camera)}\n"
+            f"🖼 {escape(shot.visual)}{event}\n"
+            f"🎥 {escape(shot.camera)}" + (f" · {where}" if where else "") + "\n"
             f"📷 {SOURCE_TITLES.get(shot.source, shot.source)}{ref}{text}")
         t = round(t + shot.duration_sec, 2)
     return _pack(blocks)
@@ -368,7 +380,8 @@ START_TITLES = {"product_photo": "с фото товара", "generated_scene": 
 END_TITLES = {"none": "", "next_start": " → сшивается со следующим кадром",
               "product_photo": " → заканчивается на фото товара"}
 TRANSITION_TITLES = {"cut": "резка на движении", "match_cut": "матч-кат",
-                     "whip_pan": "смаз камерой", "speed_ramp": "разгон", "morph": "перетекание"}
+                     "whip_pan": "смаз камерой", "object_wipe": "шторка передним планом",
+                     "speed_ramp": "разгон", "morph": "перетекание"}
 
 
 def final_text(script: VideoScript, vo: Voiceover, choice: Choice | None,
@@ -392,8 +405,9 @@ def final_text(script: VideoScript, vo: Voiceover, choice: Choice | None,
         star = " ⭐" if shot.n == script.key_shot else ""
         text = f"\n🔤 «{escape(shot.on_screen_text)}»" if shot.on_screen_text else ""
         voice = f"\n🎙 «{escape(said)}»" if said else "\n🎙 <i>пауза</i>"
+        event = f"\n⚡ {escape(shot.event)}" if shot.event else ""
         blocks.append(f"<b>{shot.n}</b> · {t:g}–{t + shot.duration_sec:g} с{star}\n"
-                      f"🖼 {escape(shot.visual)}{text}{voice}")
+                      f"🖼 {escape(shot.visual)}{event}{text}{voice}")
         t = round(t + shot.duration_sec, 2)
 
     blocks.append("💸 <b>Дальше — платная генерация:</b> каждая сцена станет отдельным "

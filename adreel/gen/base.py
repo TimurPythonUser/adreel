@@ -22,7 +22,16 @@ class ImageGenProvider(Protocol):
         aspect_ratio: str | None = None,
         progress: Progress | None = None,
     ) -> bytes:
-        """Новая картинка по референсам (реальное фото товара) и промпту."""
+        """Новая картинка по референсам (фото товара, кадр героя) и промпту."""
+        ...
+
+    async def generate(
+        self,
+        prompt: str,
+        aspect_ratio: str | None = None,
+        progress: Progress | None = None,
+    ) -> bytes:
+        """Картинка только по тексту: сцена без товара, герой появляется впервые."""
         ...
 
 

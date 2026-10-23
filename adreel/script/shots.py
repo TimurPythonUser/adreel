@@ -36,13 +36,23 @@ from pydantic import BaseModel, Field
 from .. import prompts
 from ..gen.models import VideoModel
 from ..llm.base import LLMProvider
+from . import playbook
 from .creative import Brief, brief_message, direction_block, parse_checked
 from .schema import Direction, VideoScript
 
 StartFrom = Literal["product_photo", "generated_scene", "prev_last_frame"]
 ChainMode = Literal["frame", "reference"]
 EndWith = Literal["none", "next_start", "product_photo"]
-Transition = Literal["cut", "match_cut", "whip_pan", "speed_ramp", "morph"]
+Transition = Literal["cut", "match_cut", "whip_pan", "object_wipe", "speed_ramp", "morph"]
+
+#: переходы, которые живут в ХВОСТЕ клипа: монтаж должен взять конец клипа, а не начало.
+#: Урок 23.10.2026: клип генерится на 5 с, сцена длится 2.5 с, монтаж брал начало —
+#: смаз и шторка в конце клипа просто отрезались
+TAIL_TRANSITIONS = ("whip_pan", "object_wipe", "speed_ramp", "morph")
+#: переходы, которые следующая сцена подхватывает в своём НАЧАЛЕ (выход из смаза, шторки)
+HEAD_TRANSITIONS = ("whip_pan", "object_wipe")
+#: клип длиннее сцены настолько — уже надо говорить модели, когда случается действие
+PACING_GAP = 0.75
 
 #: сплошная цепочка превращает ролик в один долгий план и копит искажения.
 #: Практика та же: переякориваться свежим кадром каждые 3–4 сцены.
@@ -68,6 +78,12 @@ CAMERA_RE = re.compile(
     r"|\b(?:static|pov|handheld|locked-off)\b", re.I)
 #: музыку модели не заказываем никогда: музыка своя, и у каждой генерации она была бы своя
 MUSIC_WORDS = ("music", "soundtrack", "score", "melody", "song")
+
+#: шторка передним планом: в хвосте сцены предмет закрывает объектив, следующая
+#: открывается из-за него. Работает, только если попросили с обеих сторон
+WIPE_OUT = ("in front of the lens", "filling the frame", "fills the frame", "covers the lens",
+            "blocks the frame", "foreground")
+WIPE_IN = ("reveal", "out of frame", "clears the frame", "slides away", "moves away from the lens")
 
 #: негативы, которые уходят в каждый промпт (негативная формулировка работает у H3)
 DEFAULT_AVOID = ("no soft dissolves or morphs", "no on-screen text or logos",
@@ -126,9 +142,31 @@ class ShotPlans(BaseModel):
         return next(g for g in self.groups() if any(p.n == n for p in g))
 
     def group_prompt(self, group: list[ShotPlan], offsets: list[float], *, duration: int = 0,
-                     end_image: bool = False, reference: bool = False) -> str:
+                     end_image: bool = False, reference: bool = False, pacing: str = "",
+                     product_ref: bool = True) -> str:
         return build_prompt(group, self.style_anchor, offsets=offsets, duration=duration,
-                            end_image=end_image, reference=reference)
+                            end_image=end_image, reference=reference, pacing=pacing,
+                            product_ref=product_ref)
+
+    def _neighbours(self, n: int) -> tuple[ShotPlan | None, ShotPlan, ShotPlan | None]:
+        i = next(k for k, s in enumerate(self.shots) if s.n == n)
+        return (self.shots[i - 1] if i else None, self.shots[i],
+                self.shots[i + 1] if i + 1 < len(self.shots) else None)
+
+    def needs_tail(self, n: int) -> bool:
+        """Монтажу нужен КОНЕЦ клипа этой сцены, а не начало: там переход, конечный кадр
+        или с последнего кадра стартует следующая сцена (иначе на стыке скачок)."""
+        _, plan, nxt = self._neighbours(n)
+        if plan.transition in TAIL_TRANSITIONS or plan.end_with != "none":
+            return True
+        return (nxt is not None and nxt.start_from == "prev_last_frame"
+                and not nxt.group_with_prev)
+
+    def needs_head(self, n: int) -> bool:
+        """Сцена начинается выходом из смаза или шторки предыдущей — нужно её начало."""
+        prev, plan, _ = self._neighbours(n)
+        return (prev is not None and prev.transition in HEAD_TRANSITIONS
+                and not plan.group_with_prev)
 
     @property
     def chained(self) -> list[int]:
@@ -145,10 +183,27 @@ def _timecode(seconds: float) -> str:
     return f"{int(seconds // 60):02d}:{seconds % 60:06.3f}"
 
 
-def _shot_block(plan: ShotPlan, style_anchor: str, n: int, at: float | None) -> str:
+def pacing_line(scene_sec: float, clip_sec: float, tail: bool) -> str:
+    """Когда в клипе случается действие, если клип длиннее сцены.
+
+    Монтаж возьмёт из клипа только scene_sec: начало или конец. Если действие модель
+    поставит в середину пятисекундного клипа, а сцена 2.5 с — в ролик попадёт пустой
+    кусок. Фразу пишет код: длины знает только он.
+    """
+    if clip_sec - scene_sec < PACING_GAP:
+        return ""
+    if tail:
+        return (f"Pacing: the shot opens calmly; the main action and the ending happen in the "
+                f"final {scene_sec:.1f} seconds.")
+    return (f"Pacing: the main action starts immediately and completes within the first "
+            f"{scene_sec:.1f} seconds, then the shot settles.")
+
+
+def _shot_block(plan: ShotPlan, style_anchor: str, n: int, at: float | None,
+                pacing: str = "") -> str:
     """Один блок [Shot N]. У первой сцены таймкода нет, у остальных он обязателен."""
     head = f"[Shot {n}]" if at is None else f"[Shot {n}] At {_timecode(at)}, the camera cuts to:"
-    body = " ".join(x for x in (plan.preserve.strip(), plan.description.strip(),
+    body = " ".join(x for x in (plan.preserve.strip(), plan.description.strip(), pacing,
                                 style_anchor.strip()) if x)
     avoid = ", ".join(dict.fromkeys([*[a.strip() for a in plan.avoid.split(",") if a.strip()],
                                      *DEFAULT_AVOID]))
@@ -156,21 +211,24 @@ def _shot_block(plan: ShotPlan, style_anchor: str, n: int, at: float | None) -> 
 
 
 def build_prompt(plans: list[ShotPlan], style_anchor: str, *, offsets: list[float] | None = None,
-                 duration: int = 0, end_image: bool = False, reference: bool = False) -> str:
+                 duration: int = 0, end_image: bool = False, reference: bool = False,
+                 pacing: str = "", product_ref: bool = True) -> str:
     """Собрать промпт в формате H3: строка выравнивания + три поля.
 
     Строку выравнивания пишем сами: только код знает, что реально ушло в запрос —
     стартовый кадр, конечный кадр или хвост предыдущего клипа. Сцен в генерации может
     быть несколько: тогда у каждой свой блок [Shot N] с таймкодом склейки.
+    pacing — фраза о том, когда случается действие (только для одной сцены в клипе).
     """
     head: list[str] = []
     if reference:
         # дословная формула продолжения: модель должна понять, что первый кадр новой
         # генерации — последний кадр присланного куска
-        head += ["<Video 1> is the tail of the previous shot of the same commercial.",
-                 "<Image 1> is the product reference; keep it identical.",
-                 "Target video is a seamless continuation of <Video 1>. "
-                 "First frame of [Shot 1] is the last frame of <Video 1>."]
+        head.append("<Video 1> is the tail of the previous shot of the same commercial.")
+        if product_ref:
+            head.append("<Image 1> is the product reference; keep it identical.")
+        head.append("Target video is a seamless continuation of <Video 1>. "
+                    "First frame of [Shot 1] is the last frame of <Video 1>.")
     else:
         head.append("For the target video, at 0.00 seconds into the target video, "
                     "<Picture 1> (from [Shot 1]) is fully referenced.")
@@ -179,7 +237,8 @@ def build_prompt(plans: list[ShotPlan], style_anchor: str, *, offsets: list[floa
                         "and belongs to [Shot 1].")
 
     starts = offsets or [0.0] * len(plans)
-    blocks = [_shot_block(p, style_anchor, i + 1, None if i == 0 else starts[i])
+    blocks = [_shot_block(p, style_anchor, i + 1, None if i == 0 else starts[i],
+                          pacing if len(plans) == 1 else "")
               for i, p in enumerate(plans)]
     sounds = [p.soundscape.strip() for p in plans if p.soundscape.strip()]
     sound = " ".join(dict.fromkeys(sounds)) or "N/A"
@@ -212,6 +271,15 @@ def _pair_errors(plan: ShotPlan, nxt: ShotPlan | None) -> list[str]:
             if nxt and "whip" not in after and "motion blur" not in after:
                 errors.append(f"сцена {nxt.n}: whip_pan — начало должно выходить из смаза "
                               "(camera decelerates from a fast pan, motion blur settling)")
+        case "object_wipe":
+            if not any(w in cur for w in WIPE_OUT):
+                errors.append(f"сцена {plan.n}: object_wipe — в конце описания предмет или "
+                              "человек проходит вплотную к объективу и закрывает кадр "
+                              "(passes right in front of the lens, filling the frame)")
+            if nxt and not any(w in after for w in WIPE_IN):
+                errors.append(f"сцена {nxt.n}: object_wipe — начало должно открываться из-за "
+                              "уходящего переднего плана (a foreground object slides out of "
+                              "frame, revealing ...)")
         case "match_cut":
             if not plan.cut_note.strip():
                 errors.append(f"сцена {plan.n}: match_cut — напиши в cut_note, какая форма "
@@ -253,6 +321,37 @@ def _group_errors(p: ShotPlans, script: VideoScript, model: VideoModel) -> list[
     return errors
 
 
+def _window_errors(p: ShotPlans, script: VideoScript, model: VideoModel) -> list[str]:
+    """Что из клипа попадёт в ролик и есть ли там то, что задумано.
+
+    Клип у модели не короче 5 с, сцена часто короче. Монтаж берёт начало клипа, а если
+    у сцены переход в хвосте или с её последнего кадра стартует следующая — конец.
+    Нужно и то и другое при длинном клипе — что-то одно потеряется: требуем выбрать.
+    """
+    errors: list[str] = []
+    by_n = {s.n: s for s in script.shots}
+    for plan in p.shots:
+        shot = by_n.get(plan.n)
+        if shot is None:
+            continue
+        if not shot.has_product and plan.start_from == "product_photo":
+            errors.append(f"сцена {plan.n}: в ней нет товара (story_scene) — start_from не "
+                          "может быть product_photo: generated_scene или prev_last_frame")
+        if len(p.group_of(plan.n)) > 1:
+            continue                      # окна внутри группы режет код по таймкодам
+        try:
+            clip = model.clip_duration(shot.duration_sec)
+        except ValueError:
+            continue                      # про слишком длинную сцену скажет режиссёр
+        if (p.needs_head(plan.n) and p.needs_tail(plan.n)
+                and clip - shot.duration_sec > PACING_GAP):
+            errors.append(f"сцена {plan.n}: начинается выходом из перехода предыдущей сцены и "
+                          f"сама нужна монтажу с конца (переход в хвосте или продолжение). "
+                          f"Из клипа {clip} с в ролик войдут только {shot.duration_sec:g} с — "
+                          "оба края не поместятся. Убери один из переходов")
+    return errors
+
+
 def check_plans(p: ShotPlans, script: VideoScript, model: VideoModel) -> list[str]:
     numbers = [s.n for s in p.shots]
     expected = [s.n for s in script.shots]
@@ -265,6 +364,7 @@ def check_plans(p: ShotPlans, script: VideoScript, model: VideoModel) -> list[st
     if p.shots and p.shots[0].group_with_prev:
         errors.append("сцена 1 не может продолжать группу — она первая")
     errors += _group_errors(p, script, model)
+    errors += _window_errors(p, script, model)
     run = 0
     last = len(p.shots) - 1
     for i, plan in enumerate(p.shots):
@@ -334,14 +434,29 @@ def check_plans(p: ShotPlans, script: VideoScript, model: VideoModel) -> list[st
     return errors
 
 
-def _shots_block(script: VideoScript) -> str:
+def _shots_block(script: VideoScript, model: VideoModel) -> str:
     rows = []
     for s in script.shots:
         ref = f" · фото {s.photo_ref}" if s.photo_ref else ""
         star = " ⭐главная" if s.n == script.key_shot else ""
-        rows.append(f"{s.n} · {s.duration_sec} с · {s.role}{star} · {s.visual} · "
-                    f"камера: {s.camera} · источник: {s.source}{ref}")
+        who = f" · в кадре: {', '.join(s.cast)}" if s.cast else ""
+        try:
+            length = model.clip_duration(s.duration_sec)
+            clip = f" · в ролике {s.duration_sec:g} с из клипа ≈{length} с"
+        except ValueError:
+            clip = ""
+        rows.append(f"{s.n} · {s.duration_sec} с · {s.role}{star} · {s.shot_size} · "
+                    f"{s.location or 'место не указано'}{who}\n"
+                    f"   кадр: {s.visual}\n   событие: {s.event or '—'}\n"
+                    f"   камера: {s.camera} · источник: {s.source}{ref}{clip}"
+                    f" · стык по сценарию: {s.transition}")
     return "\n".join(rows)
+
+
+def _cast_block(script: VideoScript) -> str:
+    if not script.cast:
+        return "Героев нет."
+    return "\n".join(f"- {c.name}: {c.look}" for c in script.cast)
 
 
 async def plan_shots(llm: LLMProvider, brief: Brief, direction: Direction, script: VideoScript,
@@ -351,8 +466,11 @@ async def plan_shots(llm: LLMProvider, brief: Brief, direction: Direction, scrip
                   if model.chain_model else
                   "Продолжение только со стоп-кадра: chain всегда \"frame\".")
     system = prompts.render("shot_prompts", model_title=model.title,
-                            model_guide=model.prompt_guide or "", shots=_shots_block(script),
+                            model_guide=model.prompt_guide or "",
+                            shots=_shots_block(script, model), cast=_cast_block(script),
                             direction=direction_block(direction),
+                            playbook=playbook.block("coverage", "transitions", "model_can",
+                                                    "model_cannot", "lessons"),
                             chain_note=chain_note, max_chain=MAX_CHAIN_RUN)
     user = brief_message(brief, instruction or "Составь промпты и план непрерывности.")
     res = await parse_checked(llm, system, user, ShotPlans,

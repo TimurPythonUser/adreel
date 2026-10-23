@@ -201,12 +201,30 @@ video:
 
 image:
   default: nano-banana-2-edit
+  # Сцены БЕЗ товара (story_scene: герой, его мир, проблема) рисуем по тексту — с фото
+  # товара в референсе модель впихивала товар в каждый кадр, и ролик выходил одинаковым.
+  text_default: nano-banana-2
   models:
     nano-banana-2-edit:
       title: Nano Banana 2 Edit
       fal_id: fal-ai/nano-banana-2/edit
+      mode: edit
       price_per_image: 0.04
+      # до 14 референсов за раз: фото товара + первая картинка героя (один человек во всех
+      # сценах). Схема сверена 23.10.2026 по fal.ai/models/fal-ai/nano-banana-2/edit/api
       inputs: {images: image_urls, prompt: prompt, aspect_ratio: aspect_ratio}
+      extra: {num_images: 1, output_format: png}
+      output: images.0.url
+      verified: false
+    nano-banana-2:
+      title: Nano Banana 2 (по тексту)
+      fal_id: fal-ai/nano-banana-2
+      mode: text
+      # Цену за картинку на странице fal не нашёл (23.10.2026) — ставлю как у edit,
+      # СВЕРИТЬ на странице модели. Схема входа: prompt, aspect_ratio, num_images,
+      # output_format (fal.ai/models/fal-ai/nano-banana-2/api)
+      price_per_image: 0.04
+      inputs: {prompt: prompt, aspect_ratio: aspect_ratio}
       extra: {num_images: 1, output_format: png}
       output: images.0.url
       verified: false

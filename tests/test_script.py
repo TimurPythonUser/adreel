@@ -27,21 +27,33 @@ CARD = ProductCard(
 
 DIRECTION = {
     "title": "Кава не холоне", "format": "проблема → рішення", "hook": "холодна кава",
-    "idea": "ранок, пробка, кава холоне", "visual_style": "теплий світ", "voice_tone": "дружній",
+    "idea": "ранок, пробка, кава холоне",
+    "beats": ["Олена в пробці відпиває каву і кривиться", "дощ, машини стоять",
+              "термокружка: з-під кришки вилітає пара", "різке гальмування — ні краплі"],
+    "cast": "Олена, 30 років, руде каре, гірчичний светр", "world": "салон авто, пробка",
+    "visual_style": "теплий світ", "voice_tone": "дружній",
     "music_mood": "легкий поп", "why_it_works": "біль знайома", "risks": "",
 }
+OLENA = {"name": "Олена", "look": "жінка 30 років, руде каре, гірчичний светр"}
 
 
-def shot(n, dur, role, ref=11, text=""):
+def shot(n, dur, role, ref=11, text="", *, size="medium", where="кухня", event="",
+         source="generated_scene", cast=()):
     return {"n": n, "duration_sec": dur, "role": role, "visual": f"кадр {n}",
-            "camera": "наезд", "source": "product_photo", "photo_ref": ref,
-            "on_screen_text": text}
+            "event": event or f"подія {n}: щось змінюється в кадрі", "camera": "наезд",
+            "shot_size": size, "location": where, "cast": list(cast), "source": source,
+            "photo_ref": ref, "on_screen_text": text}
 
 
 def good_script(total=20):
-    return {"title": "Ранок", "key_shot": 3, "shots": [
-        shot(1, 2.5, "hook"), shot(2, 4, "problem"), shot(3, 5, "solution"),
-        shot(4, 5, "benefit"), shot(5, total - 16.5, "cta", text="Замовляй на сайті")]}
+    """Сценарий, который проходит правила: события, разные крупности, есть героиня."""
+    return {"title": "Ранок", "key_shot": 3, "cast": [OLENA], "shots": [
+        shot(1, 2.5, "hook", size="close", where="салон авто", cast=["Олена"]),
+        shot(2, 4, "problem", size="wide", where="пробка"),
+        shot(3, 5, "solution", size="close", where="кухня"),
+        shot(4, 5, "benefit", size="macro", where="кухня"),
+        shot(5, total - 16.5, "cta", text="Замовляй на сайті", source="end_card",
+             where="студія")]}
 
 
 RULES = validate.ScriptRules.for_duration(20, {11, 12}, model_max=15)
@@ -70,6 +82,82 @@ def test_script_rule_violations_are_explained():
     for part in ("кадр 1 должен быть role=hook", "последний кадр", "photo_ref=99",
                  "максимум 7", "key_shot=1"):
         assert part in text
+
+
+def story_errors(mutate) -> str:
+    bad = good_script()
+    mutate(bad)
+    return " | ".join(validate.check_script(VideoScript.model_validate(bad), RULES))
+
+
+def test_scene_must_have_an_event_not_a_camera_move():
+    """Урок 22.10.2026: «медленный наезд на кружку» — это не событие, сцена пустая."""
+    def camera_only(s):
+        s["shots"][1]["event"] = "Медленный наезд на кружку"
+
+    def empty(s):
+        s["shots"][1]["event"] = ""
+
+    def same(s):
+        s["shots"][2]["event"] = s["shots"][1]["event"]
+
+    assert "движение камеры, а не событие" in story_errors(camera_only)
+    assert "заполни event" in story_errors(empty)
+    assert "одно и то же событие" in story_errors(same)
+
+
+def test_video_cannot_be_one_living_photo():
+    def packshots(s):
+        for sh in s["shots"][1:3]:
+            sh["source"] = "product_photo"
+
+    def product_only(s):
+        s["cast"] = []
+        for sh in s["shots"]:
+            sh["cast"] = []
+
+    def same_size(s):
+        for sh in s["shots"]:
+            sh["shot_size"] = "close"
+
+    assert "оживает фото товара" in story_errors(packshots)
+    assert "только товар" in story_errors(product_only)
+    assert "крупности" in story_errors(same_size)
+
+
+def test_jump_cut_and_cast_are_checked():
+    def jump(s):
+        s["shots"][3]["shot_size"] = "close"           # кадры 3 и 4: крупный, кухня, без героя
+
+    def stranger(s):
+        s["shots"][1]["cast"] = ["Петро"]
+
+    def story_key(s):
+        s["shots"][2]["source"] = "story_scene"
+
+    assert "кадры 3 и 4" in story_errors(jump) and "скачком" in story_errors(jump)
+    assert "героя «Петро» нет в cast" in story_errors(stranger)
+    assert "не может быть story_scene" in story_errors(story_key)
+
+
+def test_story_scene_needs_no_product_photo():
+    s = good_script()
+    s["shots"][1].update(source="story_scene", photo_ref=None)
+    script = validate.normalize_script(VideoScript.model_validate(s), RULES)
+    assert script.shots[1].photo_ref is None and not script.shots[1].has_product
+    assert validate.check_script(script, RULES) == []
+
+
+def test_directions_need_a_story():
+    from adreel.script.schema import Directions
+
+    flat = dict(DIRECTION, title="Красиво", beats=["товар крупно"], cast="", world="")
+    errors = " | ".join(validate.check_directions(
+        Directions.model_validate({"directions": [DIRECTION, flat,
+                                                  dict(DIRECTION, title="Третє")]}), 3))
+    assert "«Красиво»: распиши сюжет" in errors
+    assert "заполни cast" in errors and "заполни world" in errors
+    assert "Кава не холоне" not in errors
 
 
 def voice(lines, claims=()):
@@ -125,7 +213,7 @@ async def test_agent_fixes_script_after_rule_errors():
 async def test_agent_gives_up_with_clear_error():
     broken = good_script()
     broken["key_shot"] = 1
-    llm = FakeLLM([broken, broken, broken])
+    llm = FakeLLM([broken] * (creative.FIX_ROUNDS + 1))
     with pytest.raises(creative.ScriptError, match="key_shot"):
         await creative.write_script(llm, creative.Brief(CARD, [creative.PhotoInfo(11, "x")], []),
                                     creative.Direction.model_validate(DIRECTION), RULES)

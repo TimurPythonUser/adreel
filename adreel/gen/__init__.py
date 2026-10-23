@@ -8,7 +8,7 @@ import fal_client
 
 from ..config import settings
 from .fal import FalGateway, FalImageGen, FalVideoGen
-from .models import image_model, video_model
+from .models import image_model, text_image_model, video_model
 from .pending import PendingStore
 
 
@@ -34,4 +34,4 @@ def make_video_gen(model_key: str | None = None) -> FalVideoGen:
 
 
 def make_image_gen(model_key: str | None = None) -> FalImageGen:
-    return FalImageGen(make_gateway(), image_model(model_key))
+    return FalImageGen(make_gateway(), image_model(model_key), text_image_model())
