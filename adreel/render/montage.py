@@ -46,6 +46,8 @@ class MusicPart:
     start: float
     length: float
     loop: bool = False
+    #: несколько кусков трека подряд, секунды трека; пусто — один кусок start/length
+    parts: list[tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -188,7 +190,10 @@ async def _audio_track(voice: Path | None, music: MusicPart | None, total: float
         return out
 
     music_part = workdir / "music.mp3"
-    cut = await ffmpeg.audio_cut(music.path, music.start, total, loop=music.loop)
+    if len(music.parts) > 1:
+        cut = await ffmpeg.audio_parts(music.path, music.parts)
+    else:
+        cut = await ffmpeg.audio_cut(music.path, music.start, total, loop=music.loop)
     music_part.write_bytes(cut)
 
     if voice is None:

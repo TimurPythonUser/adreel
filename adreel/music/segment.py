@@ -17,17 +17,106 @@ from .analyze import ENERGY_STEP, MusicError, MusicMap, Window
 MIN_LEN = 5
 MAX_LEN = 30
 DEFAULT_LEN = 20
+#: кусок в составе нескольких: короче — на слух это уже не музыка, а обрывок
+MIN_PART = 2.0
 #: насколько далеко можно сдвинуть начало к сильной доле, чтобы звук вошёл в такт
 SNAP_SEC = 0.35
 
 _TIME = re.compile(r"(\d{1,2}):(\d{2})(?:[.,](\d+))?|(\d+(?:[.,]\d+)?)")
 _LEN = re.compile(r"(?:на|длин\w*|по)\s*(\d+(?:[.,]\d+)?)\s*(?:с\b|сек|секунд)", re.IGNORECASE)
+_T = r"\d{1,2}:\d{2}(?:[.,]\d+)?|\d+(?:[.,]\d+)?"
+#: «с 10 по 30», «10–30», «от 1:10 до 1:20», «70-80 секунду»
+_RANGE = re.compile(rf"(?:\b(?:с|от)\s+)?({_T})\s*(?:сек\w*|с\b)?\s*"
+                    rf"(?:–|—|-|\bпо\b|\bдо\b)\s*({_T})", re.IGNORECASE)
 
 
 @dataclass
 class Segment:
     window: Window
     note: str
+
+
+@dataclass
+class Parts:
+    """Несколько кусков одного трека подряд — «с 10 по 30, а в конце с 70 по 80»."""
+
+    windows: list[Window]
+    note: str
+
+    @property
+    def length(self) -> float:
+        return round(sum(w.end - w.start for w in self.windows), 3)
+
+
+def _time(s: str) -> float:
+    m = _TIME.fullmatch(s.strip())
+    if m is None:
+        raise MusicError(f"не понял время «{s}»")
+    return _seconds(m)
+
+
+def parse_parts(text: str, mmap: MusicMap) -> Parts | None:
+    """Два и больше диапазона в одной фразе — склейка кусков. Иначе None: дальше
+    работает обычный разбор одного куска (там «в конце» значит концовку трека,
+    а тут это просто слово между диапазонами)."""
+    ranges = [(_time(m.group(1)), _time(m.group(2))) for m in _RANGE.finditer(text.lower())]
+    ranges = [(a, b) for a, b in ranges if b > a]
+    if len(ranges) < 2:
+        return None
+    notes: list[str] = []
+    windows: list[Window] = []
+    total = 0.0
+    for a, b in ranges:
+        if a >= mmap.duration - MIN_PART:
+            raise MusicError(f"кусок {_mmss(a)}–{_mmss(b)} за концом трека "
+                             f"(трек {_mmss(mmap.duration)})")
+        b = min(b, mmap.duration)
+        start = _snap(a, mmap)
+        length = b - a
+        if length < MIN_PART:
+            raise MusicError(f"кусок {_mmss(a)}–{_mmss(b)} короче {MIN_PART:g} с — "
+                             "на слух это обрывок, возьми подлиннее")
+        if total + length > MAX_LEN:
+            length = MAX_LEN - total
+            notes.append(f"куски вместе длиннее {MAX_LEN} с — укоротил последний")
+        if length < MIN_PART:
+            break
+        end = min(start + length, mmap.duration)
+        windows.append(Window(start=round(start, 3), end=round(end, 3),
+                              drop_at=drop_in(start, end, mmap)))
+        total += end - start
+    if len(windows) < 2:
+        raise MusicError(f"куски слишком короткие: каждый от {MIN_PART:g} с, "
+                         f"вместе {MIN_LEN}–{MAX_LEN} с")
+    if total < MIN_LEN:
+        raise MusicError(f"куски вместе {total:.0f} с — для ролика мало, нужно от {MIN_LEN} с")
+    return Parts(windows, "; ".join(dict.fromkeys(notes)))
+
+
+def fit_parts(parts: Parts, total: float, mmap: MusicMap) -> Parts:
+    """Сценарий уже задал длину ролика: подгоняем последний кусок, первые не трогаем —
+    их владелец назвал точно."""
+    diff = round(total - parts.length, 3)
+    if abs(diff) <= 0.5:
+        return parts
+    *head, last = parts.windows
+    head_len = sum(w.end - w.start for w in head)
+    need = total - head_len
+    if need < MIN_PART:
+        raise MusicError(f"сценарий на {total:g} с, а первые куски уже {head_len:g} с — "
+                         "укороти их или убери кусок")
+    end = min(last.start + need, mmap.duration)
+    start = max(0.0, end - need)
+    fixed = Window(start=round(start, 3), end=round(end, 3),
+                   drop_at=drop_in(start, end, mmap))
+    note = "; ".join(x for x in (parts.note, f"последний кусок подогнал под сценарий "
+                                               f"{total:g} с") if x)
+    return Parts([*head, fixed], note)
+
+
+def _mmss(t: float) -> str:
+    s = max(0, round(t))
+    return f"{s // 60}:{s % 60:02d}"
 
 
 def _seconds(m: re.Match[str]) -> float:

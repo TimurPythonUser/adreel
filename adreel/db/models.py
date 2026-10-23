@@ -111,6 +111,9 @@ class Project(Base):
     # Длина куска = длина ролика.
     music_start: Mapped[float | None] = mapped_column(Float, nullable=True)
     music_end: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Несколько кусков одного трека подряд: [[10, 30], [70, 80]] — секунды трека.
+    # Задано — главнее music_start/music_end (те держат первый кусок для совместимости).
+    music_parts: Mapped[list[list[float]] | None] = mapped_column(JSON, nullable=True)
     # Креатив: выбранное направление, сценарий видео (кадры), озвучка под кадры.
     # JSON по схемам adreel.script.schema; внутри лежит версия промпта.
     direction: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

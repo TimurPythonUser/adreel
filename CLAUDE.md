@@ -25,8 +25,9 @@ Telegram-бот: из материалов о товаре собирает ре
 - `adreel/ingest/` — страницы товара, картинки, видео (yt-dlp), голосовые (Scribe), хранилище файлов
 - `adreel/product/` — карточка (`schema.py`), вопросы, сборка карточки LLM (`extract.py`),
   `ProductService` — вся логика товара; бот только вызывает его
-- `adreel/music/` — разбор трека (`analyze.py`, librosa), кусок словами (`segment.py`),
-  `MusicService` — библиотека, права, выбор куска, превью
+- `adreel/music/` — разбор трека (`analyze.py`, librosa), кусок словами (`segment.py`,
+  в т.ч. несколько кусков подряд — `parse_parts`), `MusicService` — библиотека, выбор
+  куска, превью
 - `adreel/script/` — креатив: схемы (`schema.py`), агенты с переделкой по ошибкам
   (`creative.py`), правила (`validate.py`), оператор — промпты под модель и непрерывность
   сцен (`shots.py`), `ScriptService` — направления, сценарий, озвучка, план оператора

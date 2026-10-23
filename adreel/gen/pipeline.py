@@ -509,8 +509,9 @@ class GenerationService:
         if choice is None:
             return None
         w = choice.window
+        parts = [(p.start, p.end) for p in choice.parts] if choice.multi else []
         return montage.MusicPart(self.d.media.path(choice.track.file_path), w.start,
-                                 w.end - w.start, loop=w.loop)
+                                 w.end - w.start, loop=w.loop, parts=parts)
 
     async def drop(self, project_id: int, *, reseed: bool = False) -> None:
         """Сценарий поменялся — старые клипы больше не подходят.

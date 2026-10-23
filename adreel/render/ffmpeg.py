@@ -191,6 +191,32 @@ async def audio_cut(src: Path, start: float, length: float, *, loop: bool = Fals
                       "pipe:1"])
 
 
+async def audio_parts(src: Path, parts: list[tuple[float, float]], *, crossfade: float = 0.3,
+                      fade_in: float = 0.3, fade_out: float = 1.0) -> bytes:
+    """Несколько кусков трека подряд -> mp3 ровно на сумму их длин.
+
+    Стык — короткий кроссфейд: встык без него слышен щелчок и сбой ритма. Чтобы
+    кроссфейд не съедал длину ролика, кусок перед стыком берём длиннее на его время
+    (трек дальше всё равно звучит) — итог совпадает с суммой кусков.
+    """
+    total = sum(b - a for a, b in parts)
+    n = len(parts)
+    split = "".join(f"[s{i}]" for i in range(n))
+    chains = [f"[0:a]asplit={n}{split}"]
+    for i, (a, b) in enumerate(parts):
+        end = b + (crossfade if i < n - 1 else 0.0)
+        chains.append(f"[s{i}]atrim=start={a:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[p{i}]")
+    cur = "p0"
+    for i in range(1, n):
+        chains.append(f"[{cur}][p{i}]acrossfade=d={crossfade:.2f}:c1=tri:c2=tri[x{i}]")
+        cur = f"x{i}"
+    chains.append(f"[{cur}]afade=t=in:st=0:d={fade_in:.2f},"
+                  f"afade=t=out:st={max(0.0, total - fade_out):.2f}:d={fade_out:.2f},apad[out]")
+    return await run(["-i", str(src), "-filter_complex", ";".join(chains), "-map", "[out]",
+                      "-t", f"{total:.3f}", "-c:a", "libmp3lame", "-b:a", "192k",
+                      "-ar", "44100", "-f", "mp3", "pipe:1"])
+
+
 async def audio_duration(data: bytes) -> float:
     """Длительность звука декодированием.
 

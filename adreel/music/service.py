@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import PurePath
 
@@ -67,10 +67,34 @@ class PendingTrack:
 @dataclass
 class Choice:
     track: Track
-    window: Window
+    window: Window            # первый (или единственный) кусок
     index: int
     duration: int
     map: MusicMap
+    #: куски трека подряд; один кусок — [window]
+    parts: list[Window] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.parts:
+            self.parts = [self.window]
+
+    @property
+    def multi(self) -> bool:
+        return len(self.parts) > 1
+
+    @property
+    def length(self) -> float:
+        return round(sum(w.end - w.start for w in self.parts), 3)
+
+    @property
+    def drop_at(self) -> float | None:
+        """Дроп на шкале РОЛИКА: в склейке кусков он может прийтись на любой из них."""
+        at = 0.0
+        for w in self.parts:
+            if w.drop_at is not None:
+                return round(at + w.drop_at, 2)
+            at += w.end - w.start
+        return None
 
 
 class MusicService:
@@ -141,7 +165,8 @@ class MusicService:
             t = await self._own_track(s, owner_id, track_id)
             title, rel_path = t.title, t.file_path
             await s.execute(update(Project).where(Project.track_id == track_id)
-                            .values(track_id=None, music_start=None, music_end=None))
+                            .values(track_id=None, music_start=None, music_end=None,
+                                    music_parts=None))
             await s.delete(t)
             await s.flush()
             users = sum([
@@ -235,10 +260,24 @@ class MusicService:
 
     async def choose_custom(self, project_id: int, track_id: int,
                             spec: str) -> tuple[Choice, str]:
-        """Кусок словами владельца. Его длина становится длиной ролика."""
+        """Кусок словами владельца. Его длина становится длиной ролика.
+
+        Можно и несколько кусков подряд: «с 10 по 30, а в конце с 70 по 80» — склеим
+        их мягким переходом, длина ролика — сумма кусков."""
         async with self.sessions() as s:
             p, t = await self._pair(s, project_id, track_id)
             mmap = MusicMap.model_validate(t.analysis)
+            parts = segment.parse_parts(spec, mmap)
+            if parts is not None:
+                if p.script:
+                    parts = segment.fit_parts(parts, VideoScript.model_validate(p.script).total,
+                                              mmap)
+                length = round(parts.length)
+                self._apply(p, t, parts.windows[0], length)
+                p.music_parts = [[w.start, w.end] for w in parts.windows]
+                await s.commit()
+                return (Choice(t, parts.windows[0], p.music_window, length, mmap,
+                               parts.windows), parts.note)
             seg = segment.parse(spec, mmap, default_len=p.duration_sec)
             if p.script:
                 # Сценарий уже задал длину ролика: от владельца берём только начало куска.
@@ -264,6 +303,7 @@ class MusicService:
     def _apply(p: Project, t: Track, w: Window, length: int) -> None:
         p.track_id, p.no_music = t.id, False
         p.music_start, p.music_end = w.start, w.end
+        p.music_parts = None          # один кусок; склейку ставит choose_custom поверх
         p.duration_sec = length
         t.last_used_at = datetime.now(UTC)
 
@@ -288,6 +328,7 @@ class MusicService:
                 raise MusicError("ролик не найден")
             p.track_id, p.no_music = None, True
             p.music_start = p.music_end = None
+            p.music_parts = None
             await s.commit()
 
     async def current(self, project_id: int) -> Choice | None:
@@ -300,6 +341,10 @@ class MusicService:
         if t is None:
             return None
         mmap = MusicMap.model_validate(t.analysis)
+        if p.music_parts:
+            parts = [Window(start=a, end=b, drop_at=segment.drop_in(a, b, mmap))
+                     for a, b in p.music_parts]
+            return Choice(t, parts[0], p.music_window, p.duration_sec, mmap, parts)
         # Флаг круга в проекте не хранится — выводим его: трек короче ролика обязан
         # крутиться, иначе музыка оборвётся, а без озвучки -shortest обрежет и само видео.
         w = Window(start=p.music_start, end=p.music_end, loop=mmap.duration < p.duration_sec)
@@ -307,7 +352,9 @@ class MusicService:
         return Choice(t, w, p.music_window, p.duration_sec, mmap)
 
     async def preview(self, choice: Choice) -> bytes:
-        """Ровно тот кусок, что пойдёт в ролик, с фейдами — послушать до сценария."""
+        """Ровно то, что пойдёт в ролик, с фейдами — послушать до сценария."""
+        src = self.media.path(choice.track.file_path)
+        if choice.multi:
+            return await ffmpeg.audio_parts(src, [(w.start, w.end) for w in choice.parts])
         w = choice.window
-        return await ffmpeg.audio_cut(self.media.path(choice.track.file_path), w.start,
-                                      w.end - w.start, loop=w.loop)
+        return await ffmpeg.audio_cut(src, w.start, w.end - w.start, loop=w.loop)

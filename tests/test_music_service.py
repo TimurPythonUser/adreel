@@ -57,6 +57,37 @@ def test_segment_edge_cases(mmap):
         segment.parse("как-нибудь", mmap)
 
 
+def test_several_parts_by_words(mmap):
+    """«а в конце» между диапазонами — не просьба взять концовку трека."""
+    parts = segment.parse_parts("с 10 по 30 один кусок, а в конце с 70 по 80", mmap)
+    assert parts is not None and len(parts.windows) == 2
+    first, last = parts.windows
+    assert first.start == pytest.approx(10, abs=0.4) and last.start == pytest.approx(70, abs=0.4)
+    assert first.end - first.start == pytest.approx(20)
+    assert last.end - last.start == pytest.approx(10)
+    assert parts.length == pytest.approx(30)
+    assert segment.parse_parts("0:42–1:02", mmap) is None          # один кусок — обычный разбор
+
+
+def test_parts_longer_than_a_video_are_trimmed(mmap):
+    parts = segment.parse_parts("0-20 и 40-60", mmap)
+    assert parts is not None and parts.length == pytest.approx(30)
+    assert "укоротил" in parts.note
+    with pytest.raises(MusicError, match="мало"):
+        segment.parse_parts("с 10 по 12 и с 20 по 22", mmap)
+    with pytest.raises(MusicError, match="обрывок"):
+        segment.parse_parts("с 10 по 11 и с 20 по 30", mmap)
+
+
+def test_parts_fit_the_script_by_the_last_piece(mmap):
+    parts = segment.parse_parts("10–30, 70–80", mmap)
+    assert parts is not None
+    fitted = segment.fit_parts(parts, 25, mmap)
+    assert fitted.length == pytest.approx(25)
+    assert fitted.windows[0] == parts.windows[0]               # первый кусок как назвали
+    assert "подогнал" in fitted.note
+
+
 def wav_bytes(y: np.ndarray) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -112,6 +143,29 @@ async def test_upload_rights_choose_and_preview(services):
 
     await music.no_music(project_id)
     assert await music.current(project_id) is None
+
+
+@pytest.mark.ffmpeg
+async def test_several_parts_become_one_soundtrack(services):
+    products, music = services
+    project_id = await music.start_project(await products.new_draft(1, "uk"))
+    pending = await music.prepare_upload(1, wav_bytes(click_track(90, drop_at=40)), "beat.wav")
+    track = await music.save_track(1, pending)
+
+    choice, _ = await music.choose_custom(project_id, track.id, "с 10 по 30, а в конце с 70 по 80")
+    assert choice.multi and choice.duration == 30
+    assert (await music.project(project_id)).duration_sec == 30
+
+    current = await music.current(project_id)
+    assert current is not None and len(current.parts) == 2      # пережило БД
+    mp3 = await music.preview(current)
+    assert await ffmpeg.audio_duration(mp3) == pytest.approx(30, abs=0.2)
+
+    # один кусок снова — склейка забыта
+    single, _ = await music.choose_custom(project_id, track.id, "с 10 по 30")
+    assert not single.multi
+    again = await music.current(project_id)
+    assert again is not None and not again.multi
 
 
 async def test_music_link_only_youtube(services):

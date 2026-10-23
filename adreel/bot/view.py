@@ -267,14 +267,20 @@ SEGMENT_HELP = (
     "• «0:42–1:02» — точные секунды\n"
     "• «с 30-й секунды на 20 секунд»\n"
     "• «припев» — возьму самое яркое место\n"
-    "• «вступление», «концовка», «весь трек»\n\n"
-    "Длина куска = длина ролика, от 5 до 30 секунд."
+    "• «вступление», «концовка», «весь трек»\n"
+    "• «с 10 по 30, а в конце с 70 по 80» — несколько кусков, склею мягко\n\n"
+    "Длина куска (или всех кусков вместе) = длина ролика, от 5 до 30 секунд."
 )
 
 
 def mmss(seconds: float) -> str:
     s = max(0, round(seconds))
     return f"{s // 60}:{s % 60:02d}"
+
+
+def pieces(choice: Choice) -> str:
+    """«0:10–0:30 + 1:10–1:20» — какие куски трека идут в ролик."""
+    return " + ".join(f"{mmss(w.start)}–{mmss(w.end)}" for w in choice.parts)
 
 
 def music_menu_kb(tracks_count: int) -> InlineKeyboardMarkup:
@@ -326,12 +332,13 @@ def preview_caption(choice: Choice, note: str = "", key_at: float | None = None)
     """Почему взят именно этот кусок — иначе подбор выглядит случайным."""
     w = choice.window
     m = choice.map
-    parts = [f"🎵 Кусок {mmss(w.start)}–{mmss(w.end)} · "
-             f"ролик {round(w.end - w.start)} с · {m.bpm:.0f} BPM"]
-    if w.drop_at is not None:
-        why = f"💥 Дроп на {w.drop_at:.1f} с ролика"
+    what = "Куски" if choice.multi else "Кусок"
+    parts = [f"🎵 {what} {pieces(choice)} · ролик {round(choice.length)} с · {m.bpm:.0f} BPM"]
+    drop = choice.drop_at
+    if drop is not None:
+        why = f"💥 Дроп на {drop:.1f} с ролика"
         if key_at is not None:
-            why += (" — ровно на главном кадре" if abs(w.drop_at - key_at) <= 1.0
+            why += (" — ровно на главном кадре" if abs(drop - key_at) <= 1.0
                     else f" (главный кадр на {key_at:.1f} с)")
         parts.append(why)
     else:
@@ -340,7 +347,10 @@ def preview_caption(choice: Choice, note: str = "", key_at: float | None = None)
         parts.append("📍 Дропы в треке: " + ", ".join(mmss(d) for d in m.drops[:4]))
     if w.loop:
         parts.append("🔁 Трек короче ролика — пойдёт по кругу")
-    parts.append("✂️ Не то место? Жми «Свой кусок» или напиши «с 0:42».")
+    if choice.multi:
+        parts.append("🔗 Куски склеены мягким переходом")
+    parts.append("✂️ Не то место? Жми «Свой кусок» или напиши «с 0:42» — "
+                 "можно и несколько кусков.")
     if note:
         parts.append(f"<i>{escape(note)}</i>")
     return "\n".join(parts)
@@ -369,10 +379,8 @@ def final_text(script: VideoScript, vo: Voiceover, choice: Choice | None,
     head = [f"🎬 <b>Итог: {escape(script.title)}</b>",
             f"Длина {total:g} с · сцен {len(script.shots)}"]
     if choice is not None:
-        w = choice.window
-        drop = f" · дроп на {w.drop_at:.1f} с" if w.drop_at is not None else ""
-        head.append(f"🎵 {escape(choice.track.title)} · "
-                    f"{mmss(w.start)}–{mmss(w.end)}{drop}")
+        drop = f" · дроп на {choice.drop_at:.1f} с" if choice.drop_at is not None else ""
+        head.append(f"🎵 {escape(choice.track.title)} · {pieces(choice)}{drop}")
     else:
         head.append("🔇 Без музыки — только голос")
     blocks = ["\n".join(head)]
